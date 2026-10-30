@@ -1,0 +1,165 @@
+name: Deploy Worker
+description: >-
+  Assembles a pnpm workspace from a hub repository, pins one app to the
+  triggering commit, and deploys that app as a Cloudflare Worker — to
+  production, or as a per-branch Preview. Previews are pruned so only the
+  newest few survive. Every value is supplied by the caller; this action
+  contains no project-specific configuration.
+author: Karasu Lab
+branding:
+  icon: upload-cloud
+  color: orange
+inputs:
+  mode:
+    description: "production deploys the worker; preview deploys a branch Preview"
+    required: true
+  hub-repo:
+    description: "Hub repository (owner/name) cloned to assemble the workspace"
+    required: true
+  hub-branch:
+    description: "Hub branch cloned for the assembly"
+    required: false
+    default: dev
+  app-path:
+    description: "App directory inside the assembled workspace"
+    required: true
+  node-version:
+    description: "Node.js version"
+    required: false
+    default: "24"
+  prepare-command:
+    description: "Optional command run before the build. Placeholders: {env} {app_path}"
+    required: false
+    default: ""
+  build-command:
+    description: "Optional build command. Placeholders: {env} {app_path}"
+    required: false
+    default: ""
+  deploy-command:
+    description: "Command that deploys the production worker. Placeholders: {env} {app_path}"
+    required: true
+  preview-command:
+    description: "Command that creates or updates the branch Preview. Placeholders: {branch} {secrets_file} {env} {app_path}"
+    required: true
+  secrets-command:
+    description: "Optional command that writes the worker secrets file. Placeholders: {secrets_file} {secret_names} {app_path}"
+    required: false
+    default: ""
+  secret-names:
+    description: "Space-separated names exposed to the worker; their values are read from the environment"
+    required: false
+    default: ""
+  sync-command:
+    description: "Optional production-only command run after deploy (for example a secret bulk upload). Placeholders: {secrets_file} {app_path}"
+    required: false
+    default: ""
+  worker-name:
+    description: "Worker name whose Previews are pruned"
+    required: true
+  keep-previews:
+    description: "How many of the newest Previews to keep"
+    required: false
+    default: "5"
+runs:
+  using: composite
+  steps:
+    - name: Assemble the workspace from the hub repository
+      shell: bash
+      env:
+        APP_SHA: ${{ github.sha }}
+        HUB_REPO: ${{ inputs.hub-repo }}
+        HUB_BRANCH: ${{ inputs.hub-branch }}
+        APP_PATH: ${{ inputs.app-path }}
+      run: |
+        git clone --branch "$HUB_BRANCH" --recurse-submodules "https://github.com/${HUB_REPO}.git" .
+        git -C "$APP_PATH" fetch origin "$APP_SHA"
+        git -C "$APP_PATH" checkout "$APP_SHA"
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: pnpm
+    - name: Set up pnpm
+      uses: pnpm/action-setup@v4
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile
+    - name: Run the prepare command
+      if: inputs.prepare-command != ''
+      shell: bash
+      env:
+        CMD: ${{ inputs.prepare-command }}
+        MODE: ${{ inputs.mode }}
+        APP_PATH: ${{ inputs.app-path }}
+      run: |
+        CMD="${CMD//\{env\}/$MODE}"
+        CMD="${CMD//\{app_path\}/$APP_PATH}"
+        bash -c "$CMD"
+    - name: Run the build command
+      if: inputs.build-command != ''
+      shell: bash
+      env:
+        CMD: ${{ inputs.build-command }}
+        MODE: ${{ inputs.mode }}
+        APP_PATH: ${{ inputs.app-path }}
+      run: |
+        CMD="${CMD//\{env\}/$MODE}"
+        CMD="${CMD//\{app_path\}/$APP_PATH}"
+        bash -c "$CMD"
+    - name: Write the worker secrets file
+      if: inputs.secrets-command != ''
+      shell: bash
+      env:
+        CMD: ${{ inputs.secrets-command }}
+        SECRET_NAMES: ${{ inputs.secret-names }}
+        APP_PATH: ${{ inputs.app-path }}
+      run: |
+        SECRETS_FILE="$RUNNER_TEMP/worker-secrets.json"
+        echo "SECRETS_FILE=$SECRETS_FILE" >> "$GITHUB_ENV"
+        CMD="${CMD//\{secrets_file\}/$SECRETS_FILE}"
+        CMD="${CMD//\{secret_names\}/$SECRET_NAMES}"
+        CMD="${CMD//\{app_path\}/$APP_PATH}"
+        bash -c "$CMD"
+    - name: Deploy to production
+      if: inputs.mode == 'production'
+      shell: bash
+      env:
+        CMD: ${{ inputs.deploy-command }}
+        MODE: ${{ inputs.mode }}
+        APP_PATH: ${{ inputs.app-path }}
+      run: |
+        CMD="${CMD//\{env\}/$MODE}"
+        CMD="${CMD//\{app_path\}/$APP_PATH}"
+        bash -c "$CMD"
+    - name: Run the production sync command
+      if: inputs.mode == 'production' && inputs.sync-command != ''
+      shell: bash
+      env:
+        CMD: ${{ inputs.sync-command }}
+        APP_PATH: ${{ inputs.app-path }}
+      run: |
+        CMD="${CMD//\{secrets_file\}/$SECRETS_FILE}"
+        CMD="${CMD//\{app_path\}/$APP_PATH}"
+        bash -c "$CMD"
+    - name: Deploy the branch Preview
+      if: inputs.mode == 'preview'
+      shell: bash
+      env:
+        CMD: ${{ inputs.preview-command }}
+        MODE: ${{ inputs.mode }}
+        APP_PATH: ${{ inputs.app-path }}
+        BRANCH: ${{ github.ref_name }}
+      run: |
+        CMD="${CMD//\{branch\}/$BRANCH}"
+        CMD="${CMD//\{secrets_file\}/$SECRETS_FILE}"
+        CMD="${CMD//\{env\}/$MODE}"
+        CMD="${CMD//\{app_path\}/$APP_PATH}"
+        bash -c "$CMD"
+    - name: Prune old Previews
+      shell: bash
+      env:
+        WORKER_NAME: ${{ inputs.worker-name }}
+        KEEP: ${{ inputs.keep-previews }}
+        CURRENT_BRANCH: ${{ github.ref_name }}
+        APP_DIR: ${{ inputs.app-path }}
+      run: node "$GITHUB_ACTION_PATH/scripts/prune-previews.mjs"
