@@ -67,7 +67,10 @@ async function pruneFromApi() {
     .filter((p) => p.id);
   items.sort((a, b) => b.time - a.time);
   const keepSet = new Set(items.slice(0, keep).map((p) => p.id));
-  if (currentBranch) keepSet.add(currentBranch);
+  if (currentBranch) {
+    keepSet.add(currentBranch);
+    keepSet.add(currentBranch.replace(/[^a-zA-Z0-9-]/g, "-"));
+  }
   const stale = items.filter((p) => !keepSet.has(p.id));
   console.log(`previews: ${items.length}, keeping ${items.length - stale.length}, deleting ${stale.length}`);
   for (const p of stale) await deletePreview(p.id);
@@ -95,7 +98,10 @@ function pruneFromGit() {
     .map((b) => b.trim())
     .filter((b) => b && b !== "HEAD" && b !== productionBranch);
   const keepSet = new Set(branches.slice(0, keep));
-  if (currentBranch) keepSet.add(currentBranch);
+  if (currentBranch) {
+    keepSet.add(currentBranch);
+    keepSet.add(currentBranch.replace(/[^a-zA-Z0-9-]/g, "-"));
+  }
   const stale = branches.filter((b) => !keepSet.has(b));
   console.log(`branches: ${branches.length}, keeping ${branches.length - stale.length}, deleting ${stale.length} previews`);
   return stale;
@@ -114,7 +120,9 @@ async function main() {
   }
   try {
     const stale = pruneFromGit();
-    for (const branch of stale) await deletePreview(branch);
+    for (const branch of stale) {
+      await deletePreview(branch.replace(/[^a-zA-Z0-9-]/g, "-"));
+    }
   } catch (error) {
     warn(`git fallback failed (${error.message}); nothing pruned`);
   }
